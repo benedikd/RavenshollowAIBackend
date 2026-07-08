@@ -8,15 +8,13 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("UnityWebGL", policy =>
     {
-        policy
-            .AllowAnyOrigin()
-            .AllowAnyHeader()
-            .AllowAnyMethod();
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod();
     });
 });
 
 var app = builder.Build();
-
 app.UseCors("UnityWebGL");
 
 app.MapPost("/api/chat", async (ChatRequest request) =>
@@ -24,18 +22,61 @@ app.MapPost("/api/chat", async (ChatRequest request) =>
     string? apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
 
     if (string.IsNullOrWhiteSpace(apiKey))
-        return Results.Problem("OPENAI_API_KEY is missing on server.");
+        return Results.Ok(new ChatResponse("The connection is not available right now."));
+
+    if (request.messages == null || request.messages.Count == 0)
+        return Results.Ok(new ChatResponse("I am not sure what you mean, Detective."));
+
+    // Safety limits
+    request.messages = request.messages
+        .Where(m => !string.IsNullOrWhiteSpace(m.role) && !string.IsNullOrWhiteSpace(m.content))
+        .TakeLast(12)
+        .ToList();
+
+    foreach (AIMessage message in request.messages)
+    {
+        if (message.content.Length > 8000)
+            message.content = message.content[..8000];
+    }
 
     using HttpClient client = new HttpClient();
-
     client.DefaultRequestHeaders.Authorization =
         new AuthenticationHeaderValue("Bearer", apiKey);
 
+    string model = string.IsNullOrWhiteSpace(request.model)
+        ? "gpt-5-mini"
+        : request.model;
+
+    string? answer = await AskOpenAI(client, model, request.messages, 1000);
+
+    if (string.IsNullOrWhiteSpace(answer))
+    {
+        Console.WriteLine("Empty answer. Retrying with higher token limit...");
+        answer = await AskOpenAI(client, model, request.messages, 1600);
+    }
+
+    if (string.IsNullOrWhiteSpace(answer))
+    {
+        Console.WriteLine("OpenAI still returned empty answer.");
+        answer = "Forgive me, Detective. I need a moment to gather my thoughts.";
+    }
+
+    return Results.Ok(new ChatResponse(answer));
+});
+
+app.Run();
+
+static async Task<string?> AskOpenAI(
+    HttpClient client,
+    string model,
+    List<AIMessage> messages,
+    int maxCompletionTokens)
+{
     var openAiRequest = new
     {
-        model = request.model,
-        max_completion_tokens = 700,
-        messages = request.messages
+        model = model,
+        max_completion_tokens = maxCompletionTokens,
+        messages = messages
     };
 
     string json = JsonSerializer.Serialize(openAiRequest);
@@ -53,25 +94,41 @@ app.MapPost("/api/chat", async (ChatRequest request) =>
 
     string responseText = await response.Content.ReadAsStringAsync();
 
+    Console.WriteLine("OpenAI response:");
+    Console.WriteLine(responseText);
+
     if (!response.IsSuccessStatusCode)
-        return Results.Problem(responseText);
+        return null;
 
     using JsonDocument document = JsonDocument.Parse(responseText);
 
-    string answer = document
-        .RootElement
-        .GetProperty("choices")[0]
+    JsonElement choice = document.RootElement
+        .GetProperty("choices")[0];
+
+    string finishReason = choice.TryGetProperty("finish_reason", out JsonElement finish)
+        ? finish.GetString() ?? ""
+        : "";
+
+    string? answer = choice
         .GetProperty("message")
         .GetProperty("content")
-        .GetString() ?? "";
+        .GetString();
 
-    return Results.Ok(new ChatResponse(answer));
-});
+    if (string.IsNullOrWhiteSpace(answer))
+    {
+        Console.WriteLine("Empty content. Finish reason: " + finishReason);
+        return null;
+    }
 
-app.Run();
+    return answer.Trim();
+}
 
 public record ChatRequest(string model, List<AIMessage> messages);
 
-public record AIMessage(string role, string content);
+public class AIMessage
+{
+    public string role { get; set; } = "";
+    public string content { get; set; } = "";
+}
 
 public record ChatResponse(string answer);

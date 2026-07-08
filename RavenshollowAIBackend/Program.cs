@@ -28,12 +28,12 @@ app.MapPost("/api/chat", async (ChatRequest request) =>
         return Results.Ok(new ChatResponse("I am not sure what you mean, Detective."));
 
     // Safety limits
-    request.messages = request.messages
+    List<AIMessage> messages = request.messages
         .Where(m => !string.IsNullOrWhiteSpace(m.role) && !string.IsNullOrWhiteSpace(m.content))
         .TakeLast(12)
         .ToList();
 
-    foreach (AIMessage message in request.messages)
+    foreach (AIMessage message in messages)
     {
         if (message.content.Length > 8000)
             message.content = message.content[..8000];
@@ -47,12 +47,12 @@ app.MapPost("/api/chat", async (ChatRequest request) =>
         ? "gpt-5-mini"
         : request.model;
 
-    string? answer = await AskOpenAI(client, model, request.messages, 1000);
+    string? answer = await AskOpenAI(client, model, messages, 1000);
 
     if (string.IsNullOrWhiteSpace(answer))
     {
         Console.WriteLine("Empty answer. Retrying with higher token limit...");
-        answer = await AskOpenAI(client, model, request.messages, 1600);
+        answer = await AskOpenAI(client, model, messages, 1600);
     }
 
     if (string.IsNullOrWhiteSpace(answer))
